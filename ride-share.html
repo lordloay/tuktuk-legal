@@ -121,9 +121,23 @@ function reloadButton() {
   return b;
 }
 
+// زرار «افتح المكان على جوجل مابس».
+//
+// ⚠️ **ليه جوجل مش OpenStreetMap (٩ أكتوبر ٢٠٢٦، شكوى لؤي بالنص: «ما بيدخلوش
+// على جوجل مابس»)**: الصفحة كانت بتفتح المكان على `openstreetmap.org`، والعيلة
+// بتدوس وتلاقي موقع مش اللي على موبايلها — والزرار اللي مش بيعمل اللي متوقع
+// منه **أسوأ من زرار مش موجود**. الخريطة **جوه** الصفحة فاضلة OpenStreetMap عن
+// قصد (بلاطاتهم مجانية، والقاعدة عندنا «صفر جنيه»)، واللي اتغيّر الزرار بس.
+//
+// ⚠️ **وده لينك مش بلاطات**: `google.com/maps/search/?api=1&query=…` **مجاني
+// وبلا مفتاح وبلا حساب فواتير** — وبيفتح تطبيق جوجل مابس على أندرويد وآيفون
+// وعلى الويب لو مفيش تطبيق. اللي بمفتاح ومدفوع هو **بلاطات** جوجل اللي تترسم
+// جوه الصفحة، ودي **ممنوعة** عندنا (نفس القاعدة المكتوبة في `mapAppUri`).
+//
+// ⚠️ **بلا اسم مكان عن قصد**: `query=30.6,31.0 (ميت يزيد)` جوجل بتقراها **بحث
+// بالكلام** وممكن متلاقيش حاجة. الإحداثيات بس. حارسها في `check_brand_vectors.py`.
 function mapLink(lat, lng) {
-  return 'https://www.openstreetmap.org/?mlat=' + lat + '&mlon=' + lng +
-         '#map=17/' + lat + '/' + lng;
+  return 'https://www.google.com/maps/search/?api=1&query=' + lat + ',' + lng;
 }
 
 // بلاطات OpenStreetMap بحساب الإحداثيات — من غير أي مكتبة.
@@ -207,7 +221,7 @@ function renderLive(data) {
     open.href = mapLink(d.lat, d.lng);
     open.target = '_blank';
     open.rel = 'noopener';
-    open.textContent = 'افتح المكان على الخريطة';
+    open.textContent = 'افتح المكان على جوجل مابس';
     box.appendChild(open);
   } else {
     box.appendChild(el('p', 'big', 'العربية مش بتحدّث مكانها دلوقتي'));
