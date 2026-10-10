@@ -41,7 +41,21 @@ p { margin:10px 0; }
   overflow:hidden; background:#e8edec; border:1px solid var(--line);
 }
 .map img { position:absolute; width:256px; height:256px; max-width:none; user-select:none; }
+/* مسار الرحلة — طبقة SVG فوق البلاطات.
+   ⚠️ `pointer-events:none` عشان الخط ما يمنعش السحب/الدوس على الخريطة،
+   و`overflow` من `.map` هو اللي بيقص الخط لو طلع بره.
+   والخط بيترسم **مرتين**: طبقة بيضا عريضة تحت (كيسنج) وطبقة بلون الهوية فوق —
+   من غير الكيسنج الخط بيختفي على البلاطات الفاتحة (شوارع الرمل والشوارع
+   البيضا) والكابتن يبان ماشي في الفراغ. */
+.map svg.trail { position:absolute; left:0; top:0; pointer-events:none; }
+.map svg.trail polyline { fill:none; stroke-linecap:round; stroke-linejoin:round; }
+.map svg.trail polyline.casing { stroke:#ffffff; stroke-opacity:.85; stroke-width:9; }
+.map svg.trail polyline.line { stroke:var(--brand); stroke-opacity:.95; stroke-width:5; }
 .map .pin {
+  /* ⚠️ `left/top` دول **قيمة احتياطية بس** — الـ JS بتحسب مكان الكابتن على
+     الخريطة وتحطها inline (شوف `drawMap`)، لأن مركز الخريطة بقى منتصف
+     المسار مش مكان العربية. لو الحساب ما اشتغلش لأي سبب، الماركر يقف في
+     النص (سلوك النسخة القديمة) أحسن من ما يختفي. */
   position:absolute; left:50%; top:50%; width:20px; height:20px; margin:-10px 0 0 -10px;
   border-radius:50%; background:var(--brand); border:4px solid #fff;
   box-shadow:0 1px 6px rgba(0,0,0,.35);
@@ -140,18 +154,100 @@ function mapLink(lat, lng) {
   return 'https://www.google.com/maps/search/?api=1&query=' + lat + ',' + lng;
 }
 
+// بلاطة واحدة بكسلاتها ٢٥٦ في كل الخرايط دي.
+var TILE = 256;
+
+// إسقاط ميركاتور: (lat,lng) → إحداثيات بلاطة كسرية عند تكبير معيّن.
+//
+// ⚠️ **لازم تفضل نفس المعادلة المكتوبة جوه `drawMap`** — لو اختلفوا، الخط
+// (المسار) هيبان ماشي جنب الشارع مش عليه، والعيلة تفتكر الكابتن ماشي في
+// البيوت. عشان كده المعادلة بقت دالة واحدة والاتنين بينادوا عليها.
+function project(lat, lng, zoom) {
+  var scale = Math.pow(2, zoom);
+  var rad = lat * Math.PI / 180;
+  return {
+    x: (lng + 180) / 360 * scale,
+    y: (1 - Math.log(Math.tan(rad) + 1 / Math.cos(rad)) / Math.PI) / 2 * scale
+  };
+}
+
+// المقاطع اللي تنفع ترسم: مقطع من نقطتين على الأقل، وإحداثياته أرقام حقيقية.
+//
+// ⚠️ التشديد هنا مش تنطّع: الرد جاي من الشبكة وممكن يكون قديم/ناقص، والنقطة
+// البايظة بتتحوّل `NaN` و`NaN` **بتقتل الـ SVG كله** (المتصفح بيرمي باقي
+// `points` وهو ساكت) — يعني مسار سليم يختفي بسبب نقطة واحدة.
+function normTrail(trail) {
+  var out = [];
+  if (!trail || !trail.length) return out;
+  for (var s = 0; s < trail.length; s++) {
+    var seg = trail[s], pts = [];
+    if (!seg || !seg.length) continue;
+    for (var i = 0; i < seg.length; i++) {
+      var p = seg[i], la, ln;
+      if (!p) continue;
+      if (Array.isArray(p)) { la = Number(p[0]); ln = Number(p[1]); }
+      else { la = Number(p.lat); ln = Number(p.lng); }
+      if (!isFinite(la) || !isFinite(ln)) continue;
+      if (la === 0 && ln === 0) continue;      // إحداثي مش موجود
+      pts.push([la, ln]);
+    }
+    if (pts.length >= 2) out.push(pts);
+  }
+  return out;
+}
+
+// أحسن تكبير يخلّي **المسار كله** (والعربية معاه) باين على المقاس المتاح.
+//
+// ⚠️ ليه بنغيّر التكبير أصلًا؟ لأن الخريطة كانت بتتمركز على العربية بتكبير
+// ثابت (١٦ ≈ شارعين) — يعني أول ما الكابتن يبعد، المسار يطلع بره الشاشة
+// والعيلة تشوف خط داخل من الجنب مش عارفة جاي منين. الفايدة كلها في إن
+// الطريق يبقى باين.
+//
+// ⚠️ **وبنقف عند ١٢**: على ١٢ عرض الخريطة ≈ ٥٠ كم — يعني وسط الغربية كله
+// داخل، وأي مشوار بين قريتين (٥-١٠ كم) يبان كامل. السقف موجود عشان لو
+// وصلنا مسار مجنون (خطأ بيانات) الخريطة ما تبقاش سطح الأرض كلها. الأهم إن
+// **المسار كله يفضل باين**: الخط اللي بيتقص من غير ما حد يقول، العيلة
+// بتفهمه إن دي الرحلة كلها وهو نصها.
+// ⚠️ وبناخد **منتصف المسار** مركز، مش العربية: من غير كده المسار بيتقص من
+// ناحية واحدة. والماركر بيتحط في مكانه الحقيقي بالحساب (شوف `drawMap`).
+function fitView(segs, lat, lng, w, h, zoom) {
+  var minLat = lat, maxLat = lat, minLng = lng, maxLng = lng;
+  for (var s = 0; s < segs.length; s++) {
+    for (var i = 0; i < segs[s].length; i++) {
+      var p = segs[s][i];
+      if (p[0] < minLat) minLat = p[0];
+      if (p[0] > maxLat) maxLat = p[0];
+      if (p[1] < minLng) minLng = p[1];
+      if (p[1] > maxLng) maxLng = p[1];
+    }
+  }
+  var z = zoom;
+  while (z > 12) {
+    var a = project(minLat, minLng, z), b = project(maxLat, maxLng, z);
+    if (Math.abs(b.x - a.x) * TILE <= w * 0.8 &&
+        Math.abs(b.y - a.y) * TILE <= h * 0.8) break;
+    z--;
+  }
+  return { zoom: z, lat: (minLat + maxLat) / 2, lng: (minLng + maxLng) / 2 };
+}
+
 // بلاطات OpenStreetMap بحساب الإحداثيات — من غير أي مكتبة.
-function drawMap(box, lat, lng, zoom) {
-  var TILE = 256;
+//
+// [driver] = {lat, lng} مكان العربية (الماركر)، و[trail] = مقاطع المسار.
+function drawMap(box, driver, trail, zoom) {
   var w = box.clientWidth, h = box.clientHeight;
   if (!w || !h) return;
+  var segs = normTrail(trail);
+  var lat = driver.lat, lng = driver.lng;
+  if (segs.length) {
+    var view = fitView(segs, lat, lng, w, h, zoom);
+    lat = view.lat; lng = view.lng; zoom = view.zoom;
+  }
+  var p = project(lat, lng, zoom);
   var scale = Math.pow(2, zoom);
-  var xf = (lng + 180) / 360 * scale;
-  var rad = lat * Math.PI / 180;
-  var yf = (1 - Math.log(Math.tan(rad) + 1 / Math.cos(rad)) / Math.PI) / 2 * scale;
-  var cx = Math.floor(xf), cy = Math.floor(yf);
-  var originX = w / 2 - (xf - cx) * TILE;   // يسار البلاطة المركزية
-  var originY = h / 2 - (yf - cy) * TILE;
+  var cx = Math.floor(p.x), cy = Math.floor(p.y);
+  var originX = w / 2 - (p.x - cx) * TILE;   // يسار البلاطة المركزية
+  var originY = h / 2 - (p.y - cy) * TILE;
   var c0 = Math.floor((0 - originX) / TILE), c1 = Math.floor((w - originX) / TILE);
   var r0 = Math.floor((0 - originY) / TILE), r1 = Math.floor((h - originY) / TILE);
   for (var c = c0; c <= c1; c++) {
@@ -167,7 +263,44 @@ function drawMap(box, lat, lng, zoom) {
       box.appendChild(img);
     }
   }
-  box.appendChild(el('div', 'pin'));
+
+  // ── المسار فوق البلاطات ────────────────────────────────────────────
+  if (segs.length) {
+    var NS = 'http://www.w3.org/2000/svg';
+    var svg = document.createElementNS(NS, 'svg');
+    svg.setAttribute('class', 'trail');
+    svg.setAttribute('width', w);
+    svg.setAttribute('height', h);
+    svg.setAttribute('viewBox', '0 0 ' + w + ' ' + h);
+    var layers = ['casing', 'line'];
+    for (var li = 0; li < layers.length; li++) {
+      for (var s2 = 0; s2 < segs.length; s2++) {
+        var coords = [];
+        for (var k = 0; k < segs[s2].length; k++) {
+          var q = project(segs[s2][k][0], segs[s2][k][1], zoom);
+          coords.push(
+            (originX + (q.x - cx) * TILE) + ',' + (originY + (q.y - cy) * TILE));
+        }
+        var ln = document.createElementNS(NS, 'polyline');
+        ln.setAttribute('class', layers[li]);
+        ln.setAttribute('points', coords.join(' '));
+        svg.appendChild(ln);
+      }
+    }
+    box.appendChild(svg);
+  }
+
+  // الماركر بيتحط في **مكانه على الخريطة** بالحساب، مش في نص الشاشة.
+  // ⚠️ كان `left:50%; top:50%` (نص الصندوق) — وده كان صح لما الخريطة كانت
+  // متمركزة على العربية. دلوقتي المركز ممكن يبقى منتصف المسار، فالماركر
+  // الثابت في النص بيقف في مكان الكابتن **مش** فيه — ومكان غلط بيبان صح
+  // أخطر حاجة عندنا.
+  var dp = project(driver.lat, driver.lng, zoom);
+  var pin = el('div', 'pin');
+  pin.style.left = (originX + (dp.x - cx) * TILE) + 'px';
+  pin.style.top = (originY + (dp.y - cy) * TILE) + 'px';
+  box.appendChild(pin);
+
   var credit = el('div', 'osm');
   var a = document.createElement('a');
   a.href = 'https://www.openstreetmap.org/copyright';
@@ -240,7 +373,10 @@ function renderLive(data) {
   // ⚠️ الرسم **بعد** ما الكارت يتضاف للصفحة، مش قبله: العنصر اللي لسه في
   // الذاكرة (مش في الـ DOM) مقاسه صفر، و`drawMap` بتقيس `clientWidth` —
   // فلو ناداها بدري بترجع من غير ما ترسم حاجة، والخريطة تطلع مستطيل فاضي.
-  if (map) drawMap(map, d.lat, d.lng, 16);
+  //
+  // و`data.trail` هي **مسار الرحلة** المسجّل (ميجريشن ٠٠٦٣) — نفس الشكل اللي
+  // الكابتن ماشي بيه على شاشة العميل، والصفحة بترسمه وراه.
+  if (map) drawMap(map, { lat: d.lat, lng: d.lng }, data.trail, 16);
 }
 
 function render(data) {
