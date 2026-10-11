@@ -50,14 +50,18 @@ p { margin:10px 0; }
      القرصة على الخريطة بس، مش على الصفحة. */
   touch-action:pan-y; user-select:none;
 }
-.map img { position:absolute; width:256px; height:256px; max-width:none; user-select:none; }
+/* ⚠️ **الترتيب بـ`z-index` مش بترتيب الإضافة للـDOM** — لأن عُقد الخريطة
+   (البلاطات والخط والماركر وسطر الحقوق والأزرار) بتتعمل **مرة واحدة** وبتتحدّث
+   في مكانها بعد كده (شوف `mapRepo` و`drawMap`)، فأي بلاطة جديدة بتتضاف **آخر**
+   الصندوق وبتبقى فوق الماركر والأزرار من غير الأرقام دي. */
+.map img { position:absolute; width:256px; height:256px; max-width:none; user-select:none; z-index:0; }
 /* مسار الرحلة — طبقة SVG فوق البلاطات.
    ⚠️ `pointer-events:none` عشان الخط ما يمنعش السحب/الدوس على الخريطة،
    و`overflow` من `.map` هو اللي بيقص الخط لو طلع بره.
    والخط بيترسم **مرتين**: طبقة بيضا عريضة تحت (كيسنج) وطبقة بلون الهوية فوق —
    من غير الكيسنج الخط بيختفي على البلاطات الفاتحة (شوارع الرمل والشوارع
    البيضا) والكابتن يبان ماشي في الفراغ. */
-.map svg.trail { position:absolute; left:0; top:0; pointer-events:none; }
+.map svg.trail { position:absolute; left:0; top:0; pointer-events:none; z-index:1; }
 .map svg.trail polyline { fill:none; stroke-linecap:round; stroke-linejoin:round; }
 .map svg.trail polyline.casing { stroke:#ffffff; stroke-opacity:.85; stroke-width:9; }
 .map svg.trail polyline.line { stroke:var(--brand); stroke-opacity:.95; stroke-width:5; }
@@ -68,11 +72,11 @@ p { margin:10px 0; }
      النص (سلوك النسخة القديمة) أحسن من ما يختفي. */
   position:absolute; left:50%; top:50%; width:20px; height:20px; margin:-10px 0 0 -10px;
   border-radius:50%; background:var(--brand); border:4px solid #fff;
-  box-shadow:0 1px 6px rgba(0,0,0,.35);
+  box-shadow:0 1px 6px rgba(0,0,0,.35); z-index:2;
 }
 .map .osm {
   position:absolute; inset-inline-end:6px; bottom:4px; background:rgba(255,255,255,.88);
-  font-size:12px; padding:1px 6px; border-radius:6px;
+  font-size:12px; padding:1px 6px; border-radius:6px; z-index:3;
 }
 .map .osm a { color:#4a5a58; text-decoration:none; }
 /* أزرار تكبير الخريطة + «الرحلة» (إرجاع المنظر الكامل).
@@ -83,7 +87,7 @@ p { margin:10px 0; }
   /* فوق في ناحية `inset-inline-start` (يمين في العربي) — عشان ما يزحمش سطر
      حقوق OpenStreetMap اللي تحت في الناحية التانية. */
   position:absolute; inset-inline-start:6px; top:6px;
-  display:flex; flex-direction:column; gap:6px;
+  display:flex; flex-direction:column; gap:6px; z-index:4;
 }
 .map .ctl button {
   width:44px; height:44px; padding:0; border-radius:10px; cursor:pointer;
@@ -207,6 +211,9 @@ var pinchView = null;
 // آخر حاجة اترسمت — الأزرار والقرصة بتشتغل من هنا.
 var lastMap = null;
 
+// تحديث اتأجّل لأن القرصة كانت شغّالة (شوف `tick` و`endPinch`).
+var pendingRefresh = false;
+
 // إسقاط ميركاتور: (lat,lng) → إحداثيات بلاطة كسرية عند تكبير معيّن.
 //
 // ⚠️ **لازم تفضل نفس المعادلة المكتوبة جوه `drawMap`** — لو اختلفوا، الخط
@@ -319,13 +326,27 @@ function shownZoom() {
 }
 
 // إعادة رسم الصندوق اللي على الشاشة بالحالة الحالية.
-// (بنمسح الصندوق ونبني من الأول — لأن البلاطات والمقاسات بتتغيّر، وتغيير
-// بلاطة في مكانها أصعب وأخطأ من إعادة الرسم.)
+//
+// ⚠️⚠️ **ممنوع نمسح الصندوق ونبني من الأول — وده مش تحسين أداء، ده عطل اتقاس.**
+// المتصفح **بيقطع سلسلة اللمس** لما العنصر اللي الصباع بدأ عليه يتشال من الصفحة.
+// و`redraw` كانت بتعمل `while (box.firstChild) box.removeChild(...)` — يعني
+// **البلاطة اللي تحت الصباع بتتشال** أول ما القرصة تبدأ → المتصفح بيسيب اللمسة:
+// القرصة كانت بتزوّم **خطوة واحدة** وبعدها تسكت، و`touchend` عمره ما بينده على
+// `endPinch` (يعني التكبير ما يتثبتش والمركز ما يرجعش للعربية).
+//
+// 📐 **القياس** (Chrome على الموبايل SM-S948B، ١١ أكتوبر ٢٠٢٦، نفس الصفحة
+// ونفس القرصة اللي بتتولّد من `Input.dispatchTouchEvent`):
+//   • الصفحة الحقيقية وهي بتمسح الطفل: `{touchstart:2, touchmove:1, touchend:0}`
+//   • صفحة تجريبية بنفس الـCSS وبتحافظ على العُقد: `{touchstart:2, touchmove:8,
+//     touchend:2}`
+//   • وصفحة تجريبية **بتمسح الطفل في أول حركة**: `{ts:2, tm:1, te:0}` —
+//     نفس بصمة العطل بالظبط.
+// فالـ`drawMap` بتعيد استخدام **نفس** عُقد البلاطات والخط والماركر وسطر الحقوق
+// والأزرار (شوف `mapRepo`) — مفيش عقدة بتتشال أبدًا، والزيادة بتتخبّى بـ
+// `display:none`. (والحارس: `tool/check_share_trail.js` §٩.)
 function redraw() {
   if (!lastMap) return;
-  var box = lastMap.box;
-  while (box.firstChild) box.removeChild(box.firstChild);
-  drawMap(box, lastMap.driver, lastMap.segs, lastMap.start);
+  drawMap(lastMap.box, lastMap.driver, lastMap.segs, lastMap.start);
 }
 
 // تكبير/تصغير بزرار — حوالين نص الخريطة.
@@ -374,17 +395,25 @@ function mapButton(label, title, disabled, onClick, wide) {
 }
 
 function addControls(box) {
+  var repo = mapRepo(box);
+  // ⚠️ **مرة واحدة بس**: زمان كانت بتتعمل كل رسم والمسح في `redraw` كان بيشيل
+  // القديمة؛ دلوقتي مفيش مسح، فإعادة البناء كانت هتكدّس شرايط فوق بعض.
+  if (!repo.ctl) {
+    var wrap = el('div', 'ctl');
+    wrap.appendChild(mapButton('＋', 'تكبير الخريطة', false,
+                               function () { zoomBy(1); }));
+    wrap.appendChild(mapButton('−', 'تصغير الخريطة', false,
+                               function () { zoomBy(-1); }));
+    // «الرحلة» = إرجاع المنظر التلقائي (المسار كله). اسمه بالعربي ده عشان
+    // الأهالي — «ريست» أو سهم لفة مش مفهوم.
+    wrap.appendChild(mapButton('الرحلة', 'شوف الرحلة كلها على الخريطة', false,
+                               function () { fitRide(); }, true));
+    box.appendChild(wrap);
+    repo.ctl = wrap;
+  }
   var z = shownZoom();
-  var wrap = el('div', 'ctl');
-  wrap.appendChild(mapButton('＋', 'تكبير الخريطة', z >= MAX_ZOOM,
-                             function () { zoomBy(1); }));
-  wrap.appendChild(mapButton('−', 'تصغير الخريطة', z <= MIN_ZOOM,
-                             function () { zoomBy(-1); }));
-  // «الرحلة» = إرجاع المنظر التلقائي (المسار كله). اسمه بالعربي ده عشان
-  // الأهالي — «ريست» أو سهم لفة مش مفهوم.
-  wrap.appendChild(mapButton('الرحلة', 'شوف الرحلة كلها على الخريطة', false,
-                             function () { fitRide(); }, true));
-  box.appendChild(wrap);
+  repo.ctl.children[0].disabled = z >= MAX_ZOOM;
+  repo.ctl.children[1].disabled = z <= MIN_ZOOM;
 }
 
 // القرصة بالإصبعين بقت **بتاعتنا**:
@@ -439,16 +468,19 @@ function bindGestures(box) {
   }, { passive: false });
 
   function endPinch() {
-    if (!pinch) return;
-    pinch = null;
-    // الصباع اترفع: التكبير اللي اختاره المستخدم **يتثبّت**، والمركز يرجع على
-    // العربية — عشان الكابتن ما يخرجش من الشاشة وهو ماشي (صفحة الأهل هدفها
-    // تشوف العربية، مش تتفقّد خريطة).
-    if (pinchView) {
-      mapState = { zoom: pinchView.zoom };
-      pinchView = null;
-      redraw();
+    if (pinch) {
+      pinch = null;
+      // الصباع اترفع: التكبير اللي اختاره المستخدم **يتثبّت**، والمركز يرجع على
+      // العربية — عشان الكابتن ما يخرجش من الشاشة وهو ماشي (صفحة الأهل هدفها
+      // تشوف العربية، مش تتفقّد خريطة).
+      if (pinchView) {
+        mapState = { zoom: pinchView.zoom };
+        pinchView = null;
+        redraw();
+      }
     }
+    // ولو كان فيه تحديث مستنّي القرصة تخلص (شوف `tick`) — يتنفّذ فورًا.
+    if (pendingRefresh) { pendingRefresh = false; tick(); }
   }
   box.addEventListener('touchend', endPinch);
   box.addEventListener('touchcancel', endPinch);
@@ -458,6 +490,17 @@ function bindGestures(box) {
     stop(e);
     zoomBy((e.deltaY || 0) < 0 ? 1 : -1);
   }, { passive: false });
+}
+
+// ⚠️ **عُقد الخريطة بتتخزّن على الصندوق نفسه وبتتعاد استخدامها** — مفيش عقدة
+// بتتشال من الشجرة أبدًا (السبب مشروح بالقياس في `redraw`، والنقطة المهمة:
+// المتصفح بيقطع اللمس لما العقدة اللي اللمسة بدأت عليها تتشال).
+// كل صندوق جديد (التحديث الدوري بيبني كارت جديد كل ١٥ ثانية) بيبدأ بذخيرة فاضية.
+function mapRepo(box) {
+  if (!box.__repo) {
+    box.__repo = { tiles: [], svg: null, lines: [], pin: null, credit: null, ctl: null };
+  }
+  return box.__repo;
 }
 
 // بلاطات OpenStreetMap بحساب الإحداثيات — من غير أي مكتبة.
@@ -493,30 +536,49 @@ function drawMap(box, driver, trail, zoom) {
   var ox = w / 2 - centre.x, oy = h / 2 - centre.y;   // بكسل العالم (٠٫٠) على الشاشة
   var c0 = Math.floor((0 - ox) / size), c1 = Math.floor((w - ox) / size);
   var r0 = Math.floor((0 - oy) / size), r1 = Math.floor((h - oy) / size);
+  var repo = mapRepo(box);
+  var used = 0;
   for (var c = c0; c <= c1; c++) {
     for (var r = r0; r <= r1; r++) {
       if (c < 0 || r < 0 || c >= scale || r >= scale) continue;
-      var img = document.createElement('img');
-      img.alt = '';
-      img.loading = 'lazy';
-      img.src = 'https://tile.openstreetmap.org/' + zt + '/' + c + '/' + r + '.png';
+      var src = 'https://tile.openstreetmap.org/' + zt + '/' + c + '/' + r + '.png';
+      var img = repo.tiles[used];
+      if (!img) {
+        img = document.createElement('img');
+        img.alt = '';
+        img.loading = 'lazy';
+        box.appendChild(img);
+        repo.tiles[used] = img;
+      }
+      // `__src` بدل `img.src`: الرابط بيتكتب مرة واحدة للبلاطة الواحدة، فالتكبير
+      // اللي بيرجّع بلاطة موجودة **ما بيعملش تحميل تاني** (ومفيش رَمَش أبيض).
+      if (img.__src !== src) { img.src = src; img.__src = src; }
       img.style.left = (ox + c * size) + 'px';
       img.style.top = (oy + r * size) + 'px';
       img.style.width = size + 'px';
       img.style.height = size + 'px';
-      box.appendChild(img);
+      img.style.display = '';
+      used++;
     }
   }
+  // البلاطات الزيادة (التكبير لفوق محتاج أقل) بتتخبّى **مش بتتشال**.
+  for (var rest = used; rest < repo.tiles.length; rest++) repo.tiles[rest].style.display = 'none';
 
   // ── المسار فوق البلاطات ────────────────────────────────────────────
   if (segs.length) {
     var NS = 'http://www.w3.org/2000/svg';
-    var svg = document.createElementNS(NS, 'svg');
-    svg.setAttribute('class', 'trail');
+    var svg = repo.svg;
+    if (!svg) {
+      svg = document.createElementNS(NS, 'svg');
+      svg.setAttribute('class', 'trail');
+      box.appendChild(svg);
+      repo.svg = svg;
+    }
     svg.setAttribute('width', w);
     svg.setAttribute('height', h);
     svg.setAttribute('viewBox', '0 0 ' + w + ' ' + h);
     var layers = ['casing', 'line'];
+    var drawn = 0;
     for (var li = 0; li < layers.length; li++) {
       for (var s2 = 0; s2 < segs.length; s2++) {
         var coords = [];
@@ -524,13 +586,21 @@ function drawMap(box, driver, trail, zoom) {
           var q = worldPx(segs[s2][k][0], segs[s2][k][1], st.zoom);
           coords.push((ox + q.x) + ',' + (oy + q.y));
         }
-        var ln = document.createElementNS(NS, 'polyline');
+        var ln = repo.lines[drawn];
+        if (!ln) {
+          ln = document.createElementNS(NS, 'polyline');
+          svg.appendChild(ln);
+          repo.lines[drawn] = ln;
+        }
         ln.setAttribute('class', layers[li]);
         ln.setAttribute('points', coords.join(' '));
-        svg.appendChild(ln);
+        ln.style.display = '';
+        drawn++;
       }
     }
-    box.appendChild(svg);
+    for (var lrest = drawn; lrest < repo.lines.length; lrest++) {
+      repo.lines[lrest].style.display = 'none';
+    }
   }
 
   // الماركر بيتحط في **مكانه على الخريطة** بالحساب، مش في نص الشاشة.
@@ -539,22 +609,31 @@ function drawMap(box, driver, trail, zoom) {
   // الثابت في النص بيقف في مكان الكابتن **مش** فيه — ومكان غلط بيبان صح
   // أخطر حاجة عندنا.
   var dp = worldPx(driver.lat, driver.lng, st.zoom);
-  var pin = el('div', 'pin');
+  var pin = repo.pin;
+  if (!pin) {
+    pin = el('div', 'pin');
+    box.appendChild(pin);
+    repo.pin = pin;
+  }
   pin.style.left = (ox + dp.x) + 'px';
   pin.style.top = (oy + dp.y) + 'px';
-  box.appendChild(pin);
 
-  var credit = el('div', 'osm');
-  var a = document.createElement('a');
-  a.href = 'https://www.openstreetmap.org/copyright';
-  a.target = '_blank';
-  a.rel = 'noopener';
-  a.textContent = '© OpenStreetMap';
-  credit.appendChild(a);
-  box.appendChild(credit);
+  // سطر حقوق OpenStreetMap — **مرة واحدة** (وده الرابط الوحيد اللي ممكن الصباع
+  // يبدأ عليه فوق الخريطة، فلو اتشال وسط القرصة اللمسة تتقطع زي البلاطة).
+  if (!repo.credit) {
+    var credit = el('div', 'osm');
+    var a = document.createElement('a');
+    a.href = 'https://www.openstreetmap.org/copyright';
+    a.target = '_blank';
+    a.rel = 'noopener';
+    a.textContent = '© OpenStreetMap';
+    credit.appendChild(a);
+    box.appendChild(credit);
+    repo.credit = credit;
+  }
 
-  // ⚠️ الأزرار في **آخر** الرسم: `redraw` بتمسح الصندوق كله وتنده `drawMap`
-  // تاني، فلو الأزرار كانت بتتضاف بره الدالة دي كانت **اختفت** مع أول تكبير.
+  // الأزرار بتتعمل جوه `addControls` **مرة واحدة** كمان (عن طريق نفس الذخيرة)،
+  // واللي بيتغيّر كل رسم حالة التعطيل عند السقفين بس.
   addControls(box);
   bindGestures(box);
 
@@ -657,6 +736,12 @@ function render(data) {
 function stop() { if (timer) { clearInterval(timer); timer = null; } }
 
 function tick() {
+  // ⚠️ **ممنوع نعيد بناء الكارت وإحنا وسط قرصة على الخريطة**: إعادة البناء بتشيل
+  // **صندوق الخريطة نفسه** من الصفحة، والمتصفح بيقطع سلسلة اللمس لما العقدة اللي
+  // اللمسة بدأت عليها تتشال (نفس عطل `redraw` بالظبط — مقيس، شوف التعليق هناك).
+  // فبنأجّل التحديث للدورة اللي بعدها، و`endPinch` بتنده `tick` أول ما الصباع
+  // يترفع — يعني الصفحة مش بتفضل قديمة.
+  if (pinchView) { pendingRefresh = true; return; }
   var box = document.getElementById('net');
   if (box) box.remove();
   fetch(SUPABASE_URL + '/rest/v1/rpc/shared_ride', {
